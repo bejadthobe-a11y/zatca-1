@@ -190,4 +190,165 @@ public function submitFromVb6(Request $request) {
     // 5. الإرسال باستخدام دالتك الناجحة
     $response = $this->sendToZatcaManual($payload, $authData);
 }
+
+
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Http;
+use DOMDocument;
+use Illuminate\Support\Facades\Log;
+
+class ZatcaBridgeController extends Controller
+{
+    public function submitFromVb6(Request $request)
+    {
+        try {
+
+            // بيانات تجريبية (تقدر تربطها مع VB6)
+            $vbData = $request->validate([
+                'total_amount' => 'required|numeric|min:0',
+                'customer_name' => 'nullable|string',
+            ]);
+
+            $uuid = (string) Str::uuid();
+            $invId = rand(1000, 9999);
+            $icv = rand(1000, 9999);
+            $pih = '';
+
+            // 1️⃣ توليد XML
+            $xml = $this->generateXML($uuid, $invId, $icv, $pih, $vbData);
+
+            // 2️⃣ Canonical
+            $dom = new DOMDocument();
+            $dom->preserveWhiteSpace = false;
+            $dom->formatOutput = false;
+            $dom->loadXML($xml);
+
+            $canonical = $dom->C14N(false, false);
+
+            // 3️⃣ Hash
+            $invoiceHash = base64_encode(hash('sha256', $canonical, true));
+
+            // 4️⃣ إرسال
+            $response = $this->sendToZatca($canonical, $invoiceHash, $uuid);
+                 Log::info('ZATCA Response:', $response);
+
+            return response()->json([
+                'success' => true,
+                'zatca' => $response
+            ]);
+
+        } catch (\Exception $e) {
+
+            Log::error('ZATCA ERROR', [
+                'msg' => $e->getMessage(),
+                'line' => $e->getLine()
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * توليد XML
+     */
+    private function generateXML($uuid, $invId, $icv, $pih, $data)
+    {
+        $total = number_format($data['total_amount'], 2, '.', '');
+        $tax = number_format($data['total_amount'] * 0.15, 2, '.', '');
+
+        return <<<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"
+xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2"
+xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
+
+<cbc:ProfileID>reporting:1.0</cbc:ProfileID>
+<cbc:ID>INV-{$invId}</cbc:ID>
+<cbc:UUID>{$uuid}</cbc:UUID>
+<cbc:IssueDate>2024-01-01</cbc:IssueDate>
+<cbc:IssueTime>12:00:00</cbc:IssueTime>
+
+<cbc:InvoiceTypeCode name="0111110">388</cbc:InvoiceTypeCode>
+
+<cbc:DocumentCurrencyCode>SAR</cbc:DocumentCurrencyCode>
+<cbc:TaxCurrencyCode>SAR</cbc:TaxCurrencyCode>
+
+<cac:AdditionalDocumentReference>
+<cbc:ID>ICV</cbc:ID>
+<cbc:UUID>{$icv}</cbc:UUID>
+</cac:AdditionalDocumentReference>
+
+<cac:AccountingSupplierParty>
+<cac:Party>
+<cac:PartyTaxScheme>
+<cbc:CompanyID>300642364100003</cbc:CompanyID>
+</cac:PartyTaxScheme>
+</cac:Party>
+</cac:AccountingSupplierParty>
+
+<cac:TaxTotal>
+<cbc:TaxAmount currencyID="SAR">{$tax}</cbc:TaxAmount>
+</cac:TaxTotal>
+
+<cac:LegalMonetaryTotal>
+<cbc:PayableAmount currencyID="SAR">{$total}</cbc:PayableAmount>
+</cac:LegalMonetaryTotal>
+
+</Invoice>
+XML;
+    }
+
+    /**
+     * إرسال إلى ZATCA
+     */
+    private function sendToZatca($xml, $hash, $uuid)
+    {
+        $url = "https://gw-fatoora.zatca.gov.sa/e-invoicing/simulation/compliance/invoices";
+
+        // 🔴 حط بياناتك هنا
+        $token = "TUlJQ01UQ0NBZGlnQXdJQkFnSUdBWno5YjN5bE1Bb0dDQ3FHU000OUJBTUNNQlV4RXpBUkJnTlZCQU1NQ21WSmJuWnZhV05wYm1jd0hoY05Nall3TXpFM01qQXhOREl6V2hjTk16RXdNekUyTWpFd01EQXdXakJ2TVNRd0lnWURWUVFEREJ0Q1pXcGhaQ0JCYkNCQmJtRnhZU0JOWlc1eklFWmhjMmhwYjI0eEpEQWlCZ05WQkFvTUcwSmxhbUZrSUVGc0lFRnVZWEZoSUUxbGJuTWdSbUZ6YUdsdmJqRVVNQklHQTFVRUN3d0xUV0ZwYmlCQ2NtRnVZMmd4Q3pBSkJnTlZCQVlUQWxOQk1GWXdFQVlIS29aSXpqMENBUVlGSzRFRUFBb0RRZ0FFU0VOVUlSaVpGK09UWThpTFJsRnN1Ymg2Zk1UWGZvTTdGVCtRak5IL0NUVFUrcUxSeHN4NDhpdUVxL2ttS0g2aFdteWFSNk1LWTNOZnFNSDk5RTRYNGFPQnZEQ0J1VEFNQmdOVkhSTUJBZjhFQWpBQU1JR29CZ05WSFJFRWdhQXdnWjJrZ1pvd2daY3hNakF3QmdOVkJBUU1LVEV0UWtWS1FVUjhNaTFRVDFNdE1ERjhNeTFDU2kxSlJFVk9WRWxVV1MweE56Y3pOemMzTmpBek1SOHdIUVlLQ1pJbWlaUHlMR1FCQVF3UE16QXdOalF5TXpZME1UQXdNREF6TVEwd0N3WURWUVFNREFReE1UQXdNU0F3SGdZRFZRUWFEQmRRY21sdVkyVWdVM1ZzZEdGdUlGTjBJRXBsWkdSaGFERVBNQTBHQTFVRUR3d0dVbVYwWVdsc01Bb0dDQ3FHU000OUJBTUNBMGNBTUVRQ0lEeURUUTd1bm9NRSs5NHkrUjZ3Mnl4VDJVRTZvU0VoelNsRVZCVXNvYkJ4QWlBTVdVc1BzaU14TUdtZFNyYWlTRzcwdGQrMjZQaTA4RWEyTHUzU0tyOVV2dz09";
+
+$secret = "TFCf+XI92dVSMwL8FIOVNf/H1JpJGslcimlOKCt5bFc=";
+Log::info('Auth Header:', [
+    'Authorization' => 'Basic ' . base64_encode($token . ':' . $secret)
+]);
+        $auth = base64_encode($token . ':' . $secret);
+
+Log::info('Auth Raw', [
+    'token' => $token,
+    'secret' => $secret
+]);
+
+Log::info('Auth Encoded', [
+    'auth' => $auth
+]);
+
+$response = Http::withHeaders([
+    'Authorization'   => 'Basic ' . $auth,
+    'Accept-Language' => 'EN',
+    'Accept-Version'  => 'V2',
+    'Content-Type'    => 'application/json',
+])->post($url, [
+    'invoiceHash' => $payload['invoiceHash'],
+    'uuid'        => $payload['uuid'],
+    'invoice'     => $payload['invoice'],
+]);
+
+        return [
+            'status' => $response->status(),
+            'body' => $response->json()
+        ];
+    }
+}
+
 هنا لتطابق المسار الحقيقي
